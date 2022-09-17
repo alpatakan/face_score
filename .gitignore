@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Project Settings
+/tests/samples/*.mp4
+/tests/samples/faces/*
