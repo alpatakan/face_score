@@ -441,7 +441,11 @@ class face_score:
 
     def send(self, data):
         msg = asdict(data)
-        self.conn.send(msg)
+        try:
+            self.conn.send(msg)
+        except Exception as e:
+            return False
+        return True
 
     def __del__(self):
         if self.conn:
