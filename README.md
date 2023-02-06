@@ -23,6 +23,7 @@ Save debug frames for seeing scores
 
 - face_score_config class for configuring face_score
 - Distribute frames to be processed over network for multi processing
+- Collect faces in same position using tracking, send best scoring faces in a configured period
 
 ## Example Output
 
