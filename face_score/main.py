@@ -90,7 +90,7 @@ class face_score:
                 'Distance': 80,
             },
             'Shape_Discard_TH': 70,
-            'Pose_Discard_TH': 50,
+            'Pose_Discard_TH': 55,
         },
         'Settings': {
             'Capture_Resize': None,  # (w, h)
@@ -432,7 +432,7 @@ class face_score:
             put_text(f"f{int(scores['final'])}", (face_loc[3], face_loc[0]))
             put_text(f"s{int(scores['shape'])}", (face_loc[1] - 20, face_loc[0]))
             put_text(f"p{int(scores['pose'])}", (face_loc[3], face_loc[2]))
-            put_text(f"i{int(scores['size'])}", (face_loc[1] - 20, face_loc[2]))
+            put_text(f"i{int(scores['size'] * 100)}", (face_loc[1] - 20, face_loc[2]))
             # put_text(f"c{int(scores['canny'])}", (face_loc[3] - 20, face_loc[2] + int(crop_h_ext / 2)))
 
         if self.config['Debug']['Draw_Id']:
