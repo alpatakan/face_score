@@ -16,8 +16,8 @@ import concurrent.futures
 
 face_count = 0
 discard_count = 0
-# address = ('localhost', 6000)
-address = None
+address = ('localhost', 6000)
+# address = None
 
 @dataclass
 class tracking_data:
@@ -108,8 +108,8 @@ class face_score:
             'Verbose_Logs': False,
             'No_Discard' : False,
             'Save_Frame' : False,
-            'Save_Discard' : True,
-            'Save_Face' : True,
+            'Save_Discard' : False,
+            'Save_Face' : False,
             'Debug_Files_Path': 'R:/Faces/',
         }
     }
@@ -142,13 +142,13 @@ class face_score:
                     try:
                         out_face = cv2.copyMakeBorder(out_face, 5, 5, 5, 5, cv2.BORDER_CONSTANT, value=[0, 0, 255])
                         cv2.imwrite(os.path.join(self.config['Debug']['Debug_Files_Path'] , f"discard_{'-'.join(scores['discard'])}_{timestamp:.2f}s_#{discard_count}.jpg"), out_face)
+                        print(f'-{discard_count} {timestamp:.2f} discard face:\t{scores}')
                     except Exception as e:
                         print(e)
 
                 if self.config['Debug']['No_Discard']:
                     out_face = self.color_filter(out_face)
 
-                print(f'-{discard_count} {timestamp:.2f} discard face:\t{scores}')
                 discard_count += 1
                 continue
 
@@ -156,7 +156,7 @@ class face_score:
             if len(scores['discard']) == 0:
                 self.tracking.append(tracking_data(face_loc, timestamp, scores['final']))
 
-            print(f'#{face_count} {timestamp:.2f} good    face:\t{scores}')
+            print(f'#{face_count} {timestamp:.2f} \t{scores}')
             results.append(self.Data(0, encode, out_face, (out_w, out_h), scores))
 
             if self.config['Settings']['Num_CPU'] > 1:
