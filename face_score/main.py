@@ -441,10 +441,12 @@ class face_score:
 
     def send(self, data):
         msg = asdict(data)
+
         try:
             self.conn.send(msg)
         except Exception as e:
             return False
+
         return True
 
     def __del__(self):
@@ -474,42 +476,55 @@ def main():
     cap = cv2.VideoCapture(fd.config['Settings']['Input_Path'])
     frame_num = fd.config['Settings']['Starting_Frame']
 
-    threading.Thread(target=sender_loop, args=(fd,)).start()
-    while (fd.config['Settings']['Num_CPU'] == 1):
+    def read_frame():
+        nonlocal frame_num
         frame_num += fd.config['Settings']['Skip_Frames']
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
         ret, frame = cap.read()
-        if ret:
-            res = fd.run(frame, cap.get(cv2.CAP_PROP_POS_MSEC)/1000)
-            if res is not None:
-                for r in res:
-                    if r is not None:
-                        q.put((r, cap.get(cv2.CAP_PROP_POS_MSEC)/1000))
-        else:
-            # print(f'video capture error! {ret}')
-            return
+        timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+        return timestamp, ret, frame
+
+    threading.Thread(target=sender_loop, args=(fd,)).start()
 
     while True:
+        if fd.config['Settings']['Num_CPU'] == 1:
+            timestamp, ret, frame = read_frame()
+            if not ret:
+                print(f'Read frame error! {ret}')
+                continue
+
+            results = fd.run(frame, timestamp)
+            if results is None:
+                continue
+
+            for result in results:
+                if result is None:
+                    continue
+
+                q.put((result, timestamp))
+
+            continue
+
+        # Num_CPU > 1
         frames = []
         for _ in range(fd.config['Settings']['Num_CPU']):
-            frame_num += fd.config['Settings']['Skip_Frames']
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = cap.read()
-            if ret:
-                frames.append(frame)
-            else:
-                # print(f'video capture error! {ret}')
-                return
+            timestamp, ret, frame = read_frame()
+            if not ret:
+                print(f'Read frame error! {ret}')
+                continue
+
+            frames.append(frame)
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=fd.config['Settings']['Num_CPU']) as executor:
-            results = [executor.submit(fd.run, frame, cap.get(cv2.CAP_PROP_POS_MSEC)/1000) for frame in frames]
+            results = [executor.submit(fd.run, frame, timestamp) for frame in frames]
 
             for f in concurrent.futures.as_completed(results):
-                if f.result is None:
-                    continue
-                for elem in f.result():
-                    if elem is not None:
-                        q.put((elem, cap.get(cv2.CAP_PROP_POS_MSEC)/1000))
+                for result in f.result():
+                    if result is None:
+                        continue
+
+                    q.put((result, timestamp))
+
 
 
 if __name__ == '__main__':
