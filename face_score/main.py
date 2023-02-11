@@ -16,14 +16,24 @@ import concurrent.futures
 
 face_count = 0
 discard_count = 0
+frame_count = 0
 address = ('localhost', 6000)
 # address = None
+
+'''
+read frame -> run -> add to processed queue
+poll processed queue -> send
+'''
 
 @dataclass
 class tracking_data:
     pos: Tuple[int, int]
     update: float
     score: float
+    img: np.ndarray
+    encode: np.ndarray
+    scores: dict
+    size: tuple
 
 class face_score:
     @dataclass
@@ -43,6 +53,7 @@ class face_score:
         self._frame = 30
         self.init_time = time.time()
         self.t = 0
+        self.last_update = 0.0
 
     config = {
         'PreFilter': {
@@ -86,8 +97,9 @@ class face_score:
         'PostFilter': {
             'Tracking': {
                 'Enabled': True,
-                'Timeout': 10,
-                'Distance': 80,
+                'Timeout': 2,
+                'Distance': 120,
+                'Collect': True
             },
             'Shape_Discard_TH': 70,
             'Pose_Discard_TH': 55,
@@ -95,10 +107,10 @@ class face_score:
         'Settings': {
             'Capture_Resize': None,  # (w, h)
             'Output_Scale': 1.5,
-            'Skip_Frames': 30,
+            'Skip_Frames': 5,
             'Num_CPU': 1,
             'Input_Path': 'X:/eor/backend/recognition/tests/samples/modern 720.mp4',
-            'Starting_Frame': 300,
+            'Starting_Frame': 500,
         },
         'Debug': {
             'Draw_Face_Rect': True,
@@ -115,14 +127,17 @@ class face_score:
     }
 
     def run(self, frame, timestamp):
-        results = []
+        global frame_count
         self.t = time.time()
+        self.last_update = timestamp
 
         # Detect faces
+        print(f'process frame {frame_count} ==>')
         face_locs = face_recognition.face_locations(frame) # (top, right, bottom, left) order
         encodes, raw_landmarks = face_recognition.face_encodings_landmarks(frame, face_locs, model='large')
 
         for i, encode in enumerate(encodes):
+            print(f'process face {i}')
             face_loc = face_locs[i]
             landmarks = self.process_landmarks(raw_landmarks[i])
             face, face_h, face_w = self.crop_face(frame, face_locs[i])
@@ -133,12 +148,16 @@ class face_score:
 
             discard = self.pre_filter(face, scores)
             self.criteria(landmarks, face, scores)
-            discard |= self.post_filter(face_loc, scores, timestamp)
+            discard |= self.post_filter(face_loc, scores, timestamp, out_face, encode, (out_w, out_h))
+            tracking = self.face_tracking(face_loc, scores)
+
+            scores['frame_count'] = frame_count
+            print(f"processed pos:{face_loc} i:{i} ts: {timestamp:.2f} scores: {scores}")
+            self.draw_debug(frame, face_loc, landmarks, scores, face_count)
 
             if discard:
                 global discard_count
                 if self.config['Debug']['Save_Discard']:
-                    self.draw_debug(frame, face_loc, landmarks, scores, face_count)
                     try:
                         out_face = cv2.copyMakeBorder(out_face, 5, 5, 5, 5, cv2.BORDER_CONSTANT, value=[0, 0, 255])
                         cv2.imwrite(os.path.join(self.config['Debug']['Debug_Files_Path'] , f"discard_{'-'.join(scores['discard'])}_{timestamp:.2f}s_#{discard_count}.jpg"), out_face)
@@ -152,22 +171,36 @@ class face_score:
                 discard_count += 1
                 continue
 
-            self.draw_debug(frame, face_loc, landmarks, scores, face_count)
-            if len(scores['discard']) == 0:
-                self.tracking.append(tracking_data(face_loc, timestamp, scores['final']))
+            if self.config['Debug']['Save_Face']:
+                cv2.imwrite(os.path.join(self.config['Debug']['Debug_Files_Path'] , f'{frame_count}-{i}.jpg'), out_face)
 
-            print(f'#{face_count} {timestamp:.2f} \t{scores}')
-            results.append(self.Data(0, encode, out_face, (out_w, out_h), scores))
+            if tracking:
+                if tracking < 0:
+                    self.tracking.append(tracking_data(face_loc, timestamp, scores['final'], out_face, encode, scores, (out_w, out_h)))
+                    print(f"      new pos:{face_loc} ts: {timestamp:.2f} scores: {dict((k, v) for k, v in scores.items() if k != 'discard')}")
+                    continue
 
-            if self.config['Settings']['Num_CPU'] > 1:
-                print(f'p: {os.getpid()} t: ({(time.time() - self.t):.2f}/{(time.time() - self.init_time):.2f}s) appnd face: {scores}')
-
+                t = self.tracking[tracking]
+                if t.score >= scores['final']:
+                    # discard
+                    scores['discard'].append('tracking')
+                else:
+                    self.tracking.pop(tracking)
+                    self.tracking.insert(tracking, tracking_data(face_loc, timestamp, scores['final'], out_face, encode, scores, (out_w, out_h)))
+                    print(f"update #{tracking} pos: {face_loc} -> {t.pos} fscore: {scores['final']:.2f} > {t.score:.2f} ts: {timestamp:.2f} -> {t.update:.2f} scores: {scores}")
+                continue
 
         if self.config['Debug']['Save_Frame']:
-            cv2.imwrite(os.path.join(self.config['Debug']['Debug_Files_Path'] , f'{id}f.jpg'), frame)
+            cv2.imwrite(os.path.join(self.config['Debug']['Debug_Files_Path'] , f'{frame_count}.jpg'), frame)
 
-        self.cleanup(timestamp)
-        return results
+        print(f'<== done frame {frame_count}\n')
+        frame_count += 1
+
+    def collect(self):
+        timeouts = self.timeout()
+        if timeouts is not None and len(timeouts) > 0:
+            print(f'!!!!! timeouts: {list(map(lambda x : (x.pos, x.update, x.scores), timeouts))}')
+        return timeouts
 
     def pre_filter(self, face, scores):
         discard = False
@@ -218,11 +251,8 @@ class face_score:
 
         return (dh / dt) * multipliers[ix + 1] + (dl / dt) * multipliers[ix - 1]
 
-    def post_filter(self, face_loc, scores, timestamp):
+    def post_filter(self, face_loc, scores, timestamp, img, encode, size):
         discard = False
-        if self.config['PostFilter']['Tracking']['Enabled']:
-            discard = self.face_tracking(face_loc, scores, timestamp)
-
         if scores['shape'] < self.config['PostFilter']['Shape_Discard_TH']:
             scores['discard'].append('shape')
             discard = True
@@ -241,24 +271,38 @@ class face_score:
             frame = cv2.resize(frame, self.config['Settings']['Capture_Resize'])
         return frame
 
-    def cleanup(self, timestamp):
-        self.tracking = list(filter(lambda t: timestamp - t.update < self.config['PostFilter']['Tracking']['Timeout'], self.tracking))
-
-    def face_tracking(self, face_loc, scores, timestamp):
-        discard = False
+    def timeout(self):
+        timeouts = []
+        tracking = []
         for t in self.tracking:
-            if math.dist(t.pos, face_loc) < self.config['PostFilter']['Tracking']['Distance']:
-                if t.score >= scores['final']:
-                    discard = True
-                else:
-                    t.update = timestamp
-                    t.score = scores['final']
-                break
+            if self.last_update - t.update > self.config['PostFilter']['Tracking']['Timeout']:
+                timeouts.append(t)
+            else:
+                tracking.append(t)
 
-        if discard:
-            scores['discard'].append('tracking')
+        self.tracking = tracking
+        return timeouts
 
-        return discard
+    def face_tracking(self, face_loc, scores):
+        if not self.config['PostFilter']['Tracking']['Enabled']:
+            return None
+
+        match = {}
+        for i, t in enumerate(self.tracking):
+            dist = math.dist(t.pos, face_loc)
+            print(f' delta #{i} pos:{face_loc} tpos:{t.pos} dist:{dist}')
+            if dist < self.config['PostFilter']['Tracking']['Distance']:
+                print(f' match {i}')
+                if not 'id' in match or match['dist'] > dist:
+                    match['id'] = i
+                    match['dist'] = dist
+
+        if 'id' in match:
+            print(f"fmatch #{match['id']}")
+            scores['tracking'] = (match['id'], match['dist'], face_loc)
+            return match['id']
+
+        return -1
 
     def process_landmarks(self, raw_landmarks: list) -> list:
         """
@@ -453,22 +497,20 @@ class face_score:
         if self.conn:
             self.conn.close()
 
-q = queue.Queue()
 def sender_loop(fd: face_score):
     while True:
-        data, timestamp = q.get()
-        global face_count
-        data.id = face_count
+        faces = fd.collect()
+        for data in faces:
+            global face_count
+            data.id = face_count
 
-        if fd.config['Debug']['Save_Face']:
-            cv2.imwrite(os.path.join(fd.config['Debug']['Debug_Files_Path'] , f'good_{timestamp:.2f}s_#{face_count}.jpg'), data.img)
-            # print(f'#{data.id} ({(time.time() - fd.init_time):5.2f}s) save\tface: {data.scores}')
+            if fd.config['Debug']['Save_Face']:
+                cv2.imwrite(os.path.join(fd.config['Debug']['Debug_Files_Path'] , f'good_{data.update:.2f}s_#{face_count}.jpg'), data.img)
 
-        if address is not None:
-            fd.send(data)
-
-        face_count += 1
-        q.task_done()
+            if address is not None:
+                fd.send(face_score.Data(face_count, data.encode, data.img, data.size, data.scores))
+                print(f">>send #{face_count} pos: {data.pos} ts: {data.update:.2f} scores: {dict((k, v) for k, v in data.scores.items() if k != 'discard')}")    
+            face_count += 1
 
 def main():
     start = time.perf_counter()
@@ -493,16 +535,7 @@ def main():
                 print(f'Read frame error! {ret}')
                 continue
 
-            results = fd.run(frame, timestamp)
-            if results is None:
-                continue
-
-            for result in results:
-                if result is None:
-                    continue
-
-                q.put((result, timestamp))
-
+            fd.run(frame, timestamp)
             continue
 
         # Num_CPU > 1
@@ -516,15 +549,7 @@ def main():
             frames.append(frame)
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=fd.config['Settings']['Num_CPU']) as executor:
-            results = [executor.submit(fd.run, frame, timestamp) for frame in frames]
-
-            for f in concurrent.futures.as_completed(results):
-                for result in f.result():
-                    if result is None:
-                        continue
-
-                    q.put((result, timestamp))
-
+            [executor.submit(fd.run, frame, timestamp) for frame in frames]
 
 
 if __name__ == '__main__':
